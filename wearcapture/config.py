@@ -21,8 +21,8 @@ class CaptureConfig:
     swipe_duration_ms: int = 300
 
     # Loop controls
-    scroll_delay_ms: int = 500
-    max_swipes: int = 30
+    scroll_delay_ms: int = 450
+    max_swipes: int = 24
 
     # Similarity controls
     similarity_threshold: float = 0.995

@@ -34,9 +34,9 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument("--swipe-x2", type=int)
     capture.add_argument("--swipe-y2", type=int)
     capture.add_argument("--swipe-duration-ms", type=int, default=300)
-    capture.add_argument("--scroll-delay-ms", type=int, default=500)
+    capture.add_argument("--scroll-delay-ms", type=int, default=450)
     capture.add_argument("--similarity-threshold", type=float, default=0.995)
-    capture.add_argument("--max-swipes", type=int, default=30)
+    capture.add_argument("--max-swipes", type=int, default=24)
     capture.add_argument("--pixel-diff", action="store_true", help="Use pixel-difference metric instead of SSIM")
     capture.add_argument("--circular-mask", action="store_true", help="Apply circular mask to output")
 

@@ -1,23 +1,28 @@
 # WearCapture
 
-WearCapture is a cross-platform desktop + CLI app that builds long vertically scrollable screenshots from a connected Wear OS device over local ADB.
+WearCapture is a cross-platform desktop + CLI application for generating long, vertically scrollable screenshots from a connected Wear OS device over local ADB.
 
 No watch app. No root. No cloud.
 
-## Highlights
+## Stack
 
-- Captures watch frames with `adb exec-out screencap -p`
-- Scrolls with `adb shell input swipe x1 y1 x2 y2 duration`
-- Detects scroll termination using similarity + low-motion safeguards
-- Detects overlap and stitches in memory (no intermediate image files)
-- Exports final PNG (optional circular mask)
-- Works over USB and Wi-Fi ADB
-- Supports both CLI and desktop UI
-- `Stop & Save` while capture is running
+- Engine: Python (`adb` subprocess + in-memory stitching)
+- Desktop UI: `PySide6` (Qt)
+- CLI: `argparse`
+
+## Core Features
+
+- Device detection via `adb devices -l` (USB and Wi-Fi ADB)
+- Frame capture via `adb exec-out screencap -p`
+- Scroll simulation via `adb shell input swipe ...`
+- Robust stop detection using region similarity, frame similarity, low-motion checks, and max-swipe safeguard
+- Overlap detection + deduplicated in-memory stitching
+- `Stop & Save` while capture is running (saves partial stitched result)
+- Optional circular mask output
 
 ## Example Outputs (Real Watch Data)
 
-These examples were generated from a connected Samsung Galaxy Watch4 Classic Wear OS 5 watch.
+Generated from a Samsung Galaxy Watch4 Classic Wear OS 5 device.
 
 ![User capture example](docs/examples/watch_capture_user.png)
 ![Smoke capture example](docs/examples/watch_capture_smoke.png)
@@ -26,18 +31,21 @@ These examples were generated from a connected Samsung Galaxy Watch4 Classic Wea
 ## Requirements
 
 - Python 3.10+
-- ADB binary available in `PATH` (or use `--adb-path`)
-- Python packages:
-  - `numpy`
-  - `Pillow`
+- ADB available in `PATH` (or pass `--adb-path`)
 
-Install dependencies:
+Install runtime dependencies:
 
 ```bash
 python3 -m pip install -r requirements.txt
 ```
 
-## Quick Start
+Install dev/build dependencies:
+
+```bash
+python3 -m pip install -r requirements-dev.txt
+```
+
+## Run
 
 List devices:
 
@@ -60,9 +68,9 @@ python3 -m wearcapture capture \
   --swipe-x1 220 --swipe-y1 340 \
   --swipe-x2 220 --swipe-y2 110 \
   --swipe-duration-ms 320 \
-  --scroll-delay-ms 550 \
+  --scroll-delay-ms 450 \
   --similarity-threshold 0.995 \
-  --max-swipes 35 \
+  --max-swipes 24 \
   --output out.png
 ```
 
@@ -72,33 +80,51 @@ Launch desktop UI:
 python3 -m wearcapture ui
 ```
 
-## UI Notes
+## Tuned Defaults (Live Device)
 
-- `Simple` mode auto-computes swipe coordinates.
-- `Advanced` mode exposes swipe coordinates and timing.
-- `Start Capture` begins capture/stitching.
-- `Stop & Save` stops safely and writes the stitched image from frames collected so far.
+Defaults were tuned against the connected watch on February 18, 2026.
+
+- `scroll_delay_ms=450`
+- `similarity_threshold=0.995`
+- `max_swipes=24`
+- Low-motion guard enabled (`low_motion_px=20`, `low_motion_similarity=0.93`)
+
+## Packaging (Windows/macOS/Linux)
+
+Build binaries with PyInstaller:
+
+```bash
+python3 scripts/package.py --clean
+```
+
+Outputs:
+
+- CLI binary: `dist/wearcapture-cli*`
+- Desktop binary: `dist/wearcapture-studio*`
+
+## CI
+
+- `.github/workflows/ci.yml`:
+  - compile checks
+  - unit tests
+  - CLI smoke checks
+- `.github/workflows/build-binaries.yml`:
+  - builds binaries on Linux/macOS/Windows
+  - runs on tag push (`v*`) or manual dispatch
 
 ## Architecture
 
-- `wearcapture/adb.py`: ADB wrapper (devices, screenshot, swipe, display size)
-- `wearcapture/image_ops.py`: SSIM/pixel similarity, overlap detection, stitching, circular mask
-- `wearcapture/capture_engine.py`: capture loop, termination logic, partial-stop save
-- `wearcapture/ui.py`: desktop UI
+- `wearcapture/adb.py`: ADB wrapper (devices, screenshots, swipe)
+- `wearcapture/capture_engine.py`: capture loop, stop logic, cancellation, final export
+- `wearcapture/image_ops.py`: similarity + overlap detection + stitching + circular mask
+- `wearcapture/ui.py`: PySide6 desktop UI
 - `wearcapture/cli.py`: CLI entrypoints
-- `wearcapture/config.py`: shared configuration + validation
-
-## Design Constraints (v1)
-
-- Cross-platform: Windows/macOS/Linux
-- No Android SDK requirement beyond ADB binary
-- Supports Wi-Fi ADB devices
-- Fails gracefully if ADB is missing
-- In-memory frame processing
+- `wearcapture/config.py`: capture configuration and validation
 
 ## Troubleshooting
 
-- `ADB binary was not found`: install ADB platform-tools and verify `adb version` works.
-- `No online ADB devices found`: verify `adb devices -l`, authorize device, ensure watch debugging is enabled.
-- Capture runs too long: lower `max_swipes` or increase `similarity_threshold` in advanced mode.
-- Stops too early: decrease `similarity_threshold` and/or increase swipe distance.
+- `ADB binary was not found`: install Android platform-tools and verify `adb version`.
+- `No online ADB devices found`: verify `adb devices -l` and watch authorization.
+- UI fails with missing `PySide6`: install `requirements.txt`.
+- Capture runs too long: reduce `max_swipes` or raise `similarity_threshold`.
+- Stops too early: lower `similarity_threshold` and/or increase swipe distance in advanced mode.
