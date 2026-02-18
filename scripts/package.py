@@ -53,7 +53,7 @@ def main() -> int:
     if build_cli:
         run_pyinstaller(name="wearcapture-cli", entry_script="scripts/entry_cli.py", windowed=False)
     if build_ui:
-        run_pyinstaller(name="wearcapture-studio", entry_script="scripts/entry_ui.py", windowed=True)
+        run_pyinstaller(name="wearcapture-ui", entry_script="scripts/entry_ui.py", windowed=True)
 
     print("Build complete. See dist/ for output binaries.")
     return 0

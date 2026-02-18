@@ -6,6 +6,7 @@
 - Modular capture engine with overlap-aware stitching and robust termination detection
 - CLI for device listing and capture flow
 - Desktop UI with simple/advanced controls and `Stop & Save`
+- Live preview and progress metrics panel (frames, swipes, elapsed, similarity, motion)
 - Optional circular mask export
 - Cross-platform packaging script using PyInstaller
 - GitHub Actions CI and binary build workflows

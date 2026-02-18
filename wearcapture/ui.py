@@ -5,8 +5,10 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -31,7 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from .adb import AdbClient
-from .capture_engine import WearCaptureEngine
+from .capture_engine import CaptureProgress, WearCaptureEngine
 from .config import CaptureConfig
 
 
@@ -42,31 +44,33 @@ class WearCaptureApp:
 
         self.app = QApplication.instance() or QApplication(sys.argv)
         self.window = QMainWindow()
-        self.window.setWindowTitle("WearCapture Studio")
-        self.window.resize(980, 760)
-        self.window.setMinimumSize(860, 640)
+        self.window.setWindowTitle("WearCapture")
+        self.window.resize(1120, 790)
+        self.window.setMinimumSize(940, 650)
 
-        self.log_queue: queue.Queue[str] = queue.Queue()
+        self.event_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.worker: threading.Thread | None = None
         self.stop_event: threading.Event | None = None
+        self.current_max_swipes = 24
 
         self._build_ui()
         self._apply_styles()
         self._refresh_devices()
 
-        self.log_timer = QTimer(self.window)
-        self.log_timer.setInterval(120)
-        self.log_timer.timeout.connect(self._drain_logs)
-        self.log_timer.start()
+        self.event_timer = QTimer(self.window)
+        self.event_timer.setInterval(100)
+        self.event_timer.timeout.connect(self._drain_events)
+        self.event_timer.start()
 
     def _build_ui(self) -> None:
         root = QWidget()
         self.window.setCentralWidget(root)
+
         outer = QVBoxLayout(root)
-        outer.setContentsMargins(16, 16, 16, 16)
+        outer.setContentsMargins(12, 12, 12, 12)
         outer.setSpacing(10)
 
-        title = QLabel("WearCapture Studio")
+        title = QLabel("WearCapture")
         title.setObjectName("title")
         subtitle = QLabel("Wear OS long screenshots over local ADB")
         subtitle.setObjectName("subtitle")
@@ -76,9 +80,9 @@ class WearCaptureApp:
         top_card = QFrame()
         top_card.setObjectName("card")
         top_grid = QGridLayout(top_card)
-        top_grid.setContentsMargins(14, 14, 14, 14)
-        top_grid.setHorizontalSpacing(10)
-        top_grid.setVerticalSpacing(10)
+        top_grid.setContentsMargins(10, 10, 10, 10)
+        top_grid.setHorizontalSpacing(8)
+        top_grid.setVerticalSpacing(8)
 
         top_grid.addWidget(QLabel("Device"), 0, 0)
         self.device_combo = QComboBox()
@@ -98,8 +102,16 @@ class WearCaptureApp:
         top_grid.setColumnStretch(1, 1)
         outer.addWidget(top_card)
 
+        split = QHBoxLayout()
+        split.setSpacing(10)
+        outer.addLayout(split, 1)
+
+        left = QVBoxLayout()
+        left.setSpacing(10)
+        split.addLayout(left, 3)
+
         mode_row = QHBoxLayout()
-        mode_row.setSpacing(10)
+        mode_row.setSpacing(8)
         mode_row.addWidget(QLabel("Mode"))
         self.simple_radio = QRadioButton("Simple")
         self.advanced_radio = QRadioButton("Advanced")
@@ -108,18 +120,17 @@ class WearCaptureApp:
         self.mode_group = QButtonGroup(self.window)
         self.mode_group.addButton(self.simple_radio)
         self.mode_group.addButton(self.advanced_radio)
-
         self.simple_radio.toggled.connect(self._toggle_mode)
+
         mode_row.addWidget(self.simple_radio)
         mode_row.addWidget(self.advanced_radio)
         mode_row.addStretch(1)
-        outer.addLayout(mode_row)
+        left.addLayout(mode_row)
 
         common_box = QGroupBox("Common Controls")
         common_box.setObjectName("box")
         common_form = QFormLayout(common_box)
         common_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
-        common_form.setFormAlignment(Qt.AlignmentFlag.AlignLeft)
 
         self.scroll_delay_input = QLineEdit("450")
         self.similarity_input = QLineEdit("0.995")
@@ -130,14 +141,12 @@ class WearCaptureApp:
         common_form.addRow("Similarity threshold", self.similarity_input)
         common_form.addRow("Max swipe count", self.max_swipes_input)
         common_form.addRow("", self.circular_checkbox)
-
-        outer.addWidget(common_box)
+        left.addWidget(common_box)
 
         self.advanced_box = QGroupBox("Advanced Controls")
         self.advanced_box.setObjectName("box")
         adv_form = QFormLayout(self.advanced_box)
         adv_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
-        adv_form.setFormAlignment(Qt.AlignmentFlag.AlignLeft)
 
         self.swipe_x1_input = QLineEdit("")
         self.swipe_y1_input = QLineEdit("")
@@ -155,15 +164,14 @@ class WearCaptureApp:
         adv_form.addRow("Swipe x2", self.swipe_x2_input)
         adv_form.addRow("Swipe y2", self.swipe_y2_input)
         adv_form.addRow("Swipe duration (ms)", self.swipe_duration_input)
+        left.addWidget(self.advanced_box)
 
-        outer.addWidget(self.advanced_box)
-
-        actions = QHBoxLayout()
+        action_row = QHBoxLayout()
         self.start_button = QPushButton("Start Capture")
         self.start_button.setObjectName("primary")
         self.start_button.clicked.connect(self._start_capture)
 
-        self.stop_button = QPushButton("Stop & Save")
+        self.stop_button = QPushButton("Stop and Save")
         self.stop_button.setObjectName("danger")
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self._stop_capture)
@@ -171,16 +179,16 @@ class WearCaptureApp:
         self.status_label = QLabel("Idle")
         self.status_label.setObjectName("status")
 
-        actions.addWidget(self.start_button)
-        actions.addWidget(self.stop_button)
-        actions.addWidget(self.status_label)
-        actions.addStretch(1)
-        outer.addLayout(actions)
+        action_row.addWidget(self.start_button)
+        action_row.addWidget(self.stop_button)
+        action_row.addWidget(self.status_label)
+        action_row.addStretch(1)
+        left.addLayout(action_row)
 
         self.progress = QProgressBar()
-        self.progress.setRange(0, 1)
+        self.progress.setRange(0, self.current_max_swipes)
         self.progress.setValue(0)
-        outer.addWidget(self.progress)
+        left.addWidget(self.progress)
 
         logs_box = QGroupBox("Logs")
         logs_box.setObjectName("box")
@@ -188,7 +196,53 @@ class WearCaptureApp:
         self.logs = QTextEdit()
         self.logs.setReadOnly(True)
         logs_layout.addWidget(self.logs)
-        outer.addWidget(logs_box, 1)
+        left.addWidget(logs_box, 1)
+
+        right = QVBoxLayout()
+        right.setSpacing(10)
+        split.addLayout(right, 2)
+
+        preview_box = QGroupBox("Live Preview")
+        preview_box.setObjectName("box")
+        preview_layout = QVBoxLayout(preview_box)
+        self.preview_label = QLabel("No preview yet")
+        self.preview_label.setObjectName("preview")
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setMinimumSize(320, 320)
+        preview_layout.addWidget(self.preview_label)
+        right.addWidget(preview_box)
+
+        metrics_box = QGroupBox("Live Metrics")
+        metrics_box.setObjectName("box")
+        metrics_layout = QGridLayout(metrics_box)
+
+        self.frames_metric = QLabel("0")
+        self.swipes_metric = QLabel("0")
+        self.elapsed_metric = QLabel("0.0s")
+        self.bottom_top_metric = QLabel("--")
+        self.full_metric = QLabel("--")
+        self.motion_metric = QLabel("--")
+        self.overlap_metric = QLabel("--")
+
+        metrics_layout.addWidget(QLabel("Frames"), 0, 0)
+        metrics_layout.addWidget(self.frames_metric, 0, 1)
+        metrics_layout.addWidget(QLabel("Swipes"), 1, 0)
+        metrics_layout.addWidget(self.swipes_metric, 1, 1)
+        metrics_layout.addWidget(QLabel("Elapsed"), 2, 0)
+        metrics_layout.addWidget(self.elapsed_metric, 2, 1)
+
+        metrics_layout.addWidget(QLabel("Bottom/Top sim"), 3, 0)
+        metrics_layout.addWidget(self.bottom_top_metric, 3, 1)
+        metrics_layout.addWidget(QLabel("Full-frame sim"), 4, 0)
+        metrics_layout.addWidget(self.full_metric, 4, 1)
+        metrics_layout.addWidget(QLabel("Estimated motion"), 5, 0)
+        metrics_layout.addWidget(self.motion_metric, 5, 1)
+        metrics_layout.addWidget(QLabel("Overlap sim"), 6, 0)
+        metrics_layout.addWidget(self.overlap_metric, 6, 1)
+
+        metrics_layout.setColumnStretch(1, 1)
+        right.addWidget(metrics_box)
+        right.addStretch(1)
 
         self._toggle_mode()
 
@@ -196,24 +250,24 @@ class WearCaptureApp:
         self.app.setStyleSheet(
             """
             QWidget {
-              background: #0f141b;
+              background: #11151a;
               color: #e6edf3;
               font-size: 13px;
             }
             QLabel#title {
-              font-size: 24px;
+              font-size: 22px;
               font-weight: 700;
-              color: #f0f6fc;
+              color: #f8fafc;
             }
             QLabel#subtitle {
-              color: #94a3b8;
-              margin-bottom: 4px;
+              color: #9fb0c3;
+              margin-bottom: 2px;
             }
             QFrame#card, QGroupBox#box {
-              background: #151c26;
-              border: 1px solid #2b3646;
-              border-radius: 10px;
-              margin-top: 4px;
+              background: #171d26;
+              border: 1px solid #2e3746;
+              border-radius: 0px;
+              margin-top: 2px;
             }
             QGroupBox#box {
               padding-top: 14px;
@@ -221,64 +275,59 @@ class WearCaptureApp:
             }
             QGroupBox#box::title {
               subcontrol-origin: margin;
-              left: 10px;
+              left: 8px;
               padding: 0 4px;
-              color: #bcd0e8;
+              color: #c8d4e2;
             }
-            QLineEdit, QComboBox, QTextEdit {
-              background: #0b1119;
-              border: 1px solid #2b3646;
-              border-radius: 8px;
-              padding: 6px 8px;
-              selection-background-color: #2f6dd6;
+            QLineEdit, QComboBox, QTextEdit, QLabel#preview {
+              background: #0d1117;
+              border: 1px solid #2e3746;
+              border-radius: 0px;
+              padding: 6px;
+              selection-background-color: #2b63c7;
             }
-            QComboBox::drop-down {
-              border: none;
-              width: 20px;
-            }
-            QRadioButton, QCheckBox, QLabel#status {
-              color: #d7e2f0;
+            QLabel#preview {
+              padding: 0px;
             }
             QPushButton {
-              background: #2d394a;
-              border: 1px solid #3f5068;
-              border-radius: 8px;
-              padding: 7px 13px;
+              background: #2a3342;
+              border: 1px solid #3f4d63;
+              border-radius: 0px;
+              padding: 6px 10px;
               font-weight: 600;
             }
             QPushButton:hover {
-              background: #34445a;
+              background: #344156;
             }
             QPushButton:disabled {
-              background: #222b38;
-              color: #7f90a6;
+              background: #242d3a;
+              color: #8292a6;
             }
             QPushButton#primary {
-              background: #2f6dd6;
-              border-color: #2f6dd6;
-              color: white;
+              background: #2b63c7;
+              border-color: #2b63c7;
+              color: #ffffff;
             }
             QPushButton#primary:hover {
-              background: #265fbd;
+              background: #2457ae;
             }
             QPushButton#danger {
-              background: #c94040;
-              border-color: #c94040;
-              color: white;
+              background: #b63e3e;
+              border-color: #b63e3e;
+              color: #ffffff;
             }
             QPushButton#danger:hover {
-              background: #af3737;
+              background: #9d3636;
             }
             QProgressBar {
-              border: 1px solid #2b3646;
-              border-radius: 8px;
-              background: #0b1119;
+              border: 1px solid #2e3746;
+              border-radius: 0px;
+              background: #0d1117;
               text-align: center;
-              color: #9fb0c5;
             }
             QProgressBar::chunk {
-              border-radius: 8px;
-              background: #2f6dd6;
+              background: #2b63c7;
+              border-radius: 0px;
             }
             """
         )
@@ -291,6 +340,64 @@ class WearCaptureApp:
     def _append_log(self, line: str) -> None:
         self.logs.append(line)
         self.logs.verticalScrollBar().setValue(self.logs.verticalScrollBar().maximum())
+
+    @staticmethod
+    def _fmt_optional_float(value: float | None) -> str:
+        if value is None:
+            return "--"
+        return f"{value:.4f}"
+
+    @staticmethod
+    def _fmt_elapsed(elapsed: float) -> str:
+        if elapsed < 60:
+            return f"{elapsed:.1f}s"
+        minutes = int(elapsed // 60)
+        seconds = elapsed - (minutes * 60)
+        return f"{minutes}m {seconds:.1f}s"
+
+    def _set_preview_from_png(self, preview_png: bytes | None) -> None:
+        if not preview_png:
+            return
+
+        image = QImage.fromData(preview_png, "PNG")
+        if image.isNull():
+            return
+
+        pixmap = QPixmap.fromImage(image)
+        scaled = pixmap.scaled(
+            self.preview_label.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.preview_label.setText("")
+        self.preview_label.setPixmap(scaled)
+
+    def _reset_live_metrics(self) -> None:
+        self.frames_metric.setText("0")
+        self.swipes_metric.setText("0")
+        self.elapsed_metric.setText("0.0s")
+        self.bottom_top_metric.setText("--")
+        self.full_metric.setText("--")
+        self.motion_metric.setText("--")
+        self.overlap_metric.setText("--")
+        self.preview_label.setPixmap(QPixmap())
+        self.preview_label.setText("No preview yet")
+
+    def _update_live_progress(self, progress: CaptureProgress) -> None:
+        self.frames_metric.setText(str(progress.frames_captured))
+        self.swipes_metric.setText(str(progress.swipes_performed))
+        self.elapsed_metric.setText(self._fmt_elapsed(progress.elapsed_sec))
+
+        self.bottom_top_metric.setText(self._fmt_optional_float(progress.bottom_top_similarity))
+        self.full_metric.setText(self._fmt_optional_float(progress.full_similarity))
+        self.motion_metric.setText("--" if progress.estimated_motion_px is None else f"{progress.estimated_motion_px}px")
+        self.overlap_metric.setText(self._fmt_optional_float(progress.overlap_similarity))
+
+        self.progress.setValue(min(progress.swipes_performed, self.current_max_swipes))
+        self._set_preview_from_png(progress.preview_png)
+
+        if progress.phase == "stopping":
+            self.status_label.setText("Stopping and saving...")
 
     def _refresh_devices(self) -> None:
         try:
@@ -305,8 +412,8 @@ class WearCaptureApp:
             self.device_combo.addItem(dev.serial)
 
         if devices:
-            index = self.device_combo.findText(current)
-            self.device_combo.setCurrentIndex(index if index >= 0 else 0)
+            idx = self.device_combo.findText(current)
+            self.device_combo.setCurrentIndex(idx if idx >= 0 else 0)
             self._append_log("Detected devices: " + ", ".join(d.serial for d in devices))
         else:
             self._append_log("No online ADB devices found.")
@@ -322,8 +429,7 @@ class WearCaptureApp:
             self.output_input.setText(selected)
 
     def _toggle_mode(self) -> None:
-        advanced = self.advanced_radio.isChecked()
-        self.advanced_box.setEnabled(advanced)
+        self.advanced_box.setEnabled(self.advanced_radio.isChecked())
 
     @staticmethod
     def _int_or_none(value: str) -> int | None:
@@ -352,10 +458,8 @@ class WearCaptureApp:
         self.start_button.setEnabled(not running)
         self.stop_button.setEnabled(running)
         self.status_label.setText("Capturing..." if running else "Idle")
-        if running:
-            self.progress.setRange(0, 0)
-        else:
-            self.progress.setRange(0, 1)
+        self.progress.setRange(0, self.current_max_swipes)
+        if not running:
             self.progress.setValue(0)
 
     def _start_capture(self) -> None:
@@ -370,21 +474,32 @@ class WearCaptureApp:
             QMessageBox.critical(self.window, "Invalid Configuration", str(exc))
             return
 
+        self.current_max_swipes = cfg.max_swipes
+        self.progress.setRange(0, self.current_max_swipes)
+        self._reset_live_metrics()
         self.stop_event = threading.Event()
         self._set_running_state(True)
         self._append_log("Starting capture...")
 
         def _work() -> None:
             try:
-                result = self.engine.capture(cfg, log_fn=self.log_queue.put, stop_event=self.stop_event)
-                self.log_queue.put(f"Capture done: {result.output_path}")
-                self.log_queue.put(
-                    f"Frames={result.frames_captured}, Swipes={result.swipes_performed}, Stop='{result.stop_reason}'"
+                result = self.engine.capture(
+                    cfg,
+                    log_fn=lambda m: self.event_queue.put(("log", m)),
+                    stop_event=self.stop_event,
+                    progress_fn=lambda p: self.event_queue.put(("progress", p)),
+                )
+                self.event_queue.put(("log", f"Capture done: {result.output_path}"))
+                self.event_queue.put(
+                    (
+                        "log",
+                        f"Frames={result.frames_captured}, Swipes={result.swipes_performed}, Stop='{result.stop_reason}'",
+                    )
                 )
             except Exception as exc:  # pragma: no cover - UI thread boundary
-                self.log_queue.put(f"Capture failed: {exc}")
+                self.event_queue.put(("log", f"Capture failed: {exc}"))
             finally:
-                self.log_queue.put("__DONE__")
+                self.event_queue.put(("done", None))
 
         self.worker = threading.Thread(target=_work, daemon=True)
         self.worker.start()
@@ -398,15 +513,17 @@ class WearCaptureApp:
         self.stop_event.set()
         self._append_log("Stop requested by user. Finishing current step and saving partial result...")
 
-    def _drain_logs(self) -> None:
+    def _drain_events(self) -> None:
         try:
             while True:
-                item = self.log_queue.get_nowait()
-                if item == "__DONE__":
+                event_type, payload = self.event_queue.get_nowait()
+                if event_type == "done":
                     self._set_running_state(False)
                     self.stop_event = None
-                else:
-                    self._append_log(item)
+                elif event_type == "log":
+                    self._append_log(str(payload))
+                elif event_type == "progress":
+                    self._update_live_progress(payload)
         except queue.Empty:
             pass
 

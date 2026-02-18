@@ -17,7 +17,8 @@ No watch app. No root. No cloud.
 - Scroll simulation via `adb shell input swipe ...`
 - Robust stop detection using region similarity, frame similarity, low-motion checks, and max-swipe safeguard
 - Overlap detection + deduplicated in-memory stitching
-- `Stop & Save` while capture is running (saves partial stitched result)
+- `Stop and Save` while capture is running (saves partial stitched result)
+- Live preview panel with per-iteration metrics (frames, swipes, elapsed, similarity, motion)
 - Optional circular mask output
 
 ## Example Outputs (Real Watch Data)
@@ -100,7 +101,7 @@ python3 scripts/package.py --clean
 Outputs:
 
 - CLI binary: `dist/wearcapture-cli*`
-- Desktop binary: `dist/wearcapture-studio*`
+- Desktop binary: `dist/wearcapture-ui*`
 
 ## CI
 

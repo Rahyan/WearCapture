@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from io import BytesIO
 import logging
 import time
 from pathlib import Path
@@ -14,6 +16,22 @@ from .errors import DeviceNotFoundError, MultipleDevicesError
 from .image_ops import apply_circular_mask, detect_scroll_termination, stitch_frames
 
 LogFn = Optional[Callable[[str], None]]
+ProgressFn = Optional[Callable[["CaptureProgress"], None]]
+
+
+@dataclass(slots=True)
+class CaptureProgress:
+    phase: str
+    message: str
+    elapsed_sec: float
+    swipes_performed: int
+    frames_captured: int
+    max_swipes: int
+    bottom_top_similarity: float | None = None
+    full_similarity: float | None = None
+    estimated_motion_px: int | None = None
+    overlap_similarity: float | None = None
+    preview_png: bytes | None = None
 
 
 class WearCaptureEngine:
@@ -25,6 +43,19 @@ class WearCaptureEngine:
         self.logger.info(message)
         if log_fn:
             log_fn(message)
+
+    @staticmethod
+    def _encode_preview(image: Image.Image, max_side: int = 240) -> bytes:
+        preview = image.copy()
+        preview.thumbnail((max_side, max_side), Image.Resampling.BILINEAR)
+        buf = BytesIO()
+        preview.save(buf, format="PNG")
+        return buf.getvalue()
+
+    @staticmethod
+    def _emit_progress(progress_fn: ProgressFn, progress: CaptureProgress) -> None:
+        if progress_fn:
+            progress_fn(progress)
 
     def _resolve_serial(self, preferred: Optional[str]) -> str:
         serials = self.adb.list_online_device_serials()
@@ -82,8 +113,15 @@ class WearCaptureEngine:
             remaining -= step
         return stop_event.is_set()
 
-    def capture(self, config: CaptureConfig, log_fn: LogFn = None, stop_event: Event | None = None) -> CaptureResult:
+    def capture(
+        self,
+        config: CaptureConfig,
+        log_fn: LogFn = None,
+        stop_event: Event | None = None,
+        progress_fn: ProgressFn = None,
+    ) -> CaptureResult:
         config.validate()
+        started_at = time.monotonic()
 
         if not self.adb.is_available():
             raise RuntimeError("ADB is not available in PATH. Install platform-tools and retry.")
@@ -95,6 +133,18 @@ class WearCaptureEngine:
         first = self.adb.capture_screen(serial)
         frames.append(first)
         self._log(f"Captured initial frame: {first.size[0]}x{first.size[1]}", log_fn)
+        self._emit_progress(
+            progress_fn,
+            CaptureProgress(
+                phase="initial",
+                message="Captured initial frame",
+                elapsed_sec=time.monotonic() - started_at,
+                swipes_performed=0,
+                frames_captured=1,
+                max_swipes=config.max_swipes,
+                preview_png=self._encode_preview(first),
+            ),
+        )
 
         swipe = self._auto_swipe_spec(first) if config.simple_mode else self._advanced_swipe_spec(config, first)
         self._log(
@@ -111,6 +161,17 @@ class WearCaptureEngine:
             if stop_event and stop_event.is_set():
                 stop_reason = "user requested stop"
                 self._log(f"Stopping capture: {stop_reason}", log_fn)
+                self._emit_progress(
+                    progress_fn,
+                    CaptureProgress(
+                        phase="stopping",
+                        message=stop_reason,
+                        elapsed_sec=time.monotonic() - started_at,
+                        swipes_performed=performed_swipes,
+                        frames_captured=len(frames),
+                        max_swipes=config.max_swipes,
+                    ),
+                )
                 break
 
             self.adb.swipe(serial, swipe.x1, swipe.y1, swipe.x2, swipe.y2, swipe.duration_ms)
@@ -119,6 +180,17 @@ class WearCaptureEngine:
             if canceled_during_delay:
                 stop_reason = "user requested stop"
                 self._log(f"Stopping capture: {stop_reason}", log_fn)
+                self._emit_progress(
+                    progress_fn,
+                    CaptureProgress(
+                        phase="stopping",
+                        message=stop_reason,
+                        elapsed_sec=time.monotonic() - started_at,
+                        swipes_performed=performed_swipes,
+                        frames_captured=len(frames),
+                        max_swipes=config.max_swipes,
+                    ),
+                )
                 break
 
             curr = self.adb.capture_screen(serial)
@@ -129,6 +201,18 @@ class WearCaptureEngine:
                 frames.append(curr)
                 stop_reason = "user requested stop"
                 self._log(f"Stopping capture: {stop_reason}", log_fn)
+                self._emit_progress(
+                    progress_fn,
+                    CaptureProgress(
+                        phase="stopping",
+                        message=stop_reason,
+                        elapsed_sec=time.monotonic() - started_at,
+                        swipes_performed=performed_swipes,
+                        frames_captured=len(frames),
+                        max_swipes=config.max_swipes,
+                        preview_png=self._encode_preview(curr),
+                    ),
+                )
                 break
 
             stop = detect_scroll_termination(prev, curr, config)
@@ -139,10 +223,42 @@ class WearCaptureEngine:
                 f"overlap_sim={stop.overlap_similarity:.4f}",
                 log_fn,
             )
+            self._emit_progress(
+                progress_fn,
+                CaptureProgress(
+                    phase="iteration",
+                    message=f"Iteration {idx + 1}",
+                    elapsed_sec=time.monotonic() - started_at,
+                    swipes_performed=performed_swipes,
+                    frames_captured=len(frames) + 1,
+                    max_swipes=config.max_swipes,
+                    bottom_top_similarity=stop.bottom_top_similarity,
+                    full_similarity=stop.full_similarity,
+                    estimated_motion_px=stop.estimated_motion_px,
+                    overlap_similarity=stop.overlap_similarity,
+                    preview_png=self._encode_preview(curr),
+                ),
+            )
 
             if stop.should_stop:
                 stop_reason = stop.reason
                 self._log(f"Stopping capture: {stop_reason}", log_fn)
+                self._emit_progress(
+                    progress_fn,
+                    CaptureProgress(
+                        phase="stopping",
+                        message=stop_reason,
+                        elapsed_sec=time.monotonic() - started_at,
+                        swipes_performed=performed_swipes,
+                        frames_captured=len(frames),
+                        max_swipes=config.max_swipes,
+                        bottom_top_similarity=stop.bottom_top_similarity,
+                        full_similarity=stop.full_similarity,
+                        estimated_motion_px=stop.estimated_motion_px,
+                        overlap_similarity=stop.overlap_similarity,
+                        preview_png=self._encode_preview(curr),
+                    ),
+                )
                 break
 
             if stop.low_motion_candidate:
@@ -157,6 +273,22 @@ class WearCaptureEngine:
                         f"{config.low_motion_consecutive} consecutive frames"
                     )
                     self._log(f"Stopping capture: {stop_reason}", log_fn)
+                    self._emit_progress(
+                        progress_fn,
+                        CaptureProgress(
+                            phase="stopping",
+                            message=stop_reason,
+                            elapsed_sec=time.monotonic() - started_at,
+                            swipes_performed=performed_swipes,
+                            frames_captured=len(frames),
+                            max_swipes=config.max_swipes,
+                            bottom_top_similarity=stop.bottom_top_similarity,
+                            full_similarity=stop.full_similarity,
+                            estimated_motion_px=stop.estimated_motion_px,
+                            overlap_similarity=stop.overlap_similarity,
+                            preview_png=self._encode_preview(curr),
+                        ),
+                    )
                     break
             else:
                 low_motion_hits = 0
@@ -173,6 +305,18 @@ class WearCaptureEngine:
         stitched.save(output, format="PNG")
 
         self._log(f"Saved stitched image: {output} ({stitched.size[0]}x{stitched.size[1]})", log_fn)
+        self._emit_progress(
+            progress_fn,
+            CaptureProgress(
+                phase="complete",
+                message="Saved stitched image",
+                elapsed_sec=time.monotonic() - started_at,
+                swipes_performed=performed_swipes,
+                frames_captured=len(frames),
+                max_swipes=config.max_swipes,
+                preview_png=self._encode_preview(stitched),
+            ),
+        )
 
         return CaptureResult(
             output_path=output,
