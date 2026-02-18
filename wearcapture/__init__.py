@@ -5,4 +5,5 @@ __all__ = [
     "adb",
     "capture_engine",
     "image_ops",
+    "profiles",
 ]

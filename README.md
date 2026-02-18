@@ -19,6 +19,9 @@ No watch app. No root. No cloud.
 - Overlap detection + deduplicated in-memory stitching
 - `Stop and Save` while capture is running (saves partial stitched result)
 - Live preview panel with per-iteration metrics (frames, swipes, elapsed, similarity, motion)
+- Named capture profiles (builtin + user profiles in JSON)
+- Auto-suggested profile based on connected device model/resolution
+- Profile import/export and profile save from CLI/UI
 - Optional circular mask output
 
 ## Example Outputs (Real Watch Data)
@@ -75,6 +78,27 @@ python3 -m wearcapture capture \
   --output out.png
 ```
 
+Capture using profile + save tuned profile:
+
+```bash
+python3 -m wearcapture capture \
+  --serial 192.168.1.77:5555 \
+  --profile galaxy_watch_450 \
+  --max-swipes 28 \
+  --save-profile my_watch_tuned \
+  --save-profile-description "My personal tuned profile" \
+  --output out.png
+```
+
+Profile commands:
+
+```bash
+python3 -m wearcapture profiles list
+python3 -m wearcapture profiles suggest --serial 192.168.1.77:5555
+python3 -m wearcapture profiles export --name my_watch_tuned --output my_watch_tuned.json
+python3 -m wearcapture profiles import --input my_watch_tuned.json --rename my_watch_clone
+```
+
 Launch desktop UI:
 
 ```bash
@@ -103,6 +127,8 @@ Outputs:
 - CLI binary: `dist/wearcapture-cli*`
 - Desktop binary: `dist/wearcapture-ui*`
 
+For CI/release matrix builds, the workflow appends OS suffixes (for example `wearcapture-ui-windows-latest.exe`).
+
 ## CI
 
 - `.github/workflows/ci.yml`:
@@ -112,15 +138,24 @@ Outputs:
 - `.github/workflows/build-binaries.yml`:
   - builds binaries on Linux/macOS/Windows
   - runs on tag push (`v*`) or manual dispatch
+  - uploads matrix artifacts
+  - auto-attaches built binaries to tag releases
 
 ## Architecture
 
 - `wearcapture/adb.py`: ADB wrapper (devices, screenshots, swipe)
 - `wearcapture/capture_engine.py`: capture loop, stop logic, cancellation, final export
 - `wearcapture/image_ops.py`: similarity + overlap detection + stitching + circular mask
+- `wearcapture/profiles.py`: profile storage, suggestion, import/export, profile application
 - `wearcapture/ui.py`: PySide6 desktop UI
 - `wearcapture/cli.py`: CLI entrypoints
 - `wearcapture/config.py`: capture configuration and validation
+
+## Profile Storage
+
+- Default profile store: `~/.wearcapture/profiles.json`
+- Builtin profiles are always available and can be overridden by user profiles with the same name.
+- UI supports profile apply/save/import/export directly.
 
 ## Troubleshooting
 

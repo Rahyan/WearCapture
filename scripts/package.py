@@ -9,6 +9,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def with_suffix(name: str, suffix: str | None) -> str:
+    if not suffix:
+        return name
+    normalized = suffix.strip().replace(" ", "_")
+    return f"{name}-{normalized}"
+
+
 def run_pyinstaller(name: str, entry_script: str, windowed: bool) -> None:
     cmd = [
         sys.executable,
@@ -38,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cli", action="store_true", help="Build CLI binary")
     parser.add_argument("--ui", action="store_true", help="Build desktop UI binary")
     parser.add_argument("--clean", action="store_true", help="Remove old build/dist first")
+    parser.add_argument("--name-suffix", help="Optional suffix appended to output binary names")
     return parser.parse_args()
 
 
@@ -51,9 +59,17 @@ def main() -> int:
         clean_build_dirs()
 
     if build_cli:
-        run_pyinstaller(name="wearcapture-cli", entry_script="scripts/entry_cli.py", windowed=False)
+        run_pyinstaller(
+            name=with_suffix("wearcapture-cli", args.name_suffix),
+            entry_script="scripts/entry_cli.py",
+            windowed=False,
+        )
     if build_ui:
-        run_pyinstaller(name="wearcapture-ui", entry_script="scripts/entry_ui.py", windowed=True)
+        run_pyinstaller(
+            name=with_suffix("wearcapture-ui", args.name_suffix),
+            entry_script="scripts/entry_ui.py",
+            windowed=True,
+        )
 
     print("Build complete. See dist/ for output binaries.")
     return 0

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import re
 import sys
 import threading
 from datetime import datetime
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -35,12 +37,24 @@ from PySide6.QtWidgets import (
 from .adb import AdbClient
 from .capture_engine import CaptureProgress, WearCaptureEngine
 from .config import CaptureConfig
+from .profiles import (
+    CaptureProfile,
+    config_to_profile_config,
+    default_profiles_path,
+    export_profile,
+    extract_model_from_details,
+    import_profile,
+    load_profiles,
+    suggest_profile_for_serial,
+    upsert_profile,
+)
 
 
 class WearCaptureApp:
-    def __init__(self, adb_path: str = "adb"):
+    def __init__(self, adb_path: str = "adb", profile_path: Path | None = None):
         self.adb = AdbClient(adb_path=adb_path)
         self.engine = WearCaptureEngine(adb_client=self.adb)
+        self.profile_path = profile_path or default_profiles_path()
 
         self.app = QApplication.instance() or QApplication(sys.argv)
         self.window = QMainWindow()
@@ -52,9 +66,11 @@ class WearCaptureApp:
         self.worker: threading.Thread | None = None
         self.stop_event: threading.Event | None = None
         self.current_max_swipes = 24
+        self.profile_map: dict[str, CaptureProfile] = {}
 
         self._build_ui()
         self._apply_styles()
+        self._reload_profiles()
         self._refresh_devices()
 
         self.event_timer = QTimer(self.window)
@@ -87,6 +103,7 @@ class WearCaptureApp:
         top_grid.addWidget(QLabel("Device"), 0, 0)
         self.device_combo = QComboBox()
         self.device_combo.setEditable(False)
+        self.device_combo.currentTextChanged.connect(self._on_device_changed)
         top_grid.addWidget(self.device_combo, 0, 1)
         refresh_btn = QPushButton("Refresh")
         refresh_btn.clicked.connect(self._refresh_devices)
@@ -98,6 +115,33 @@ class WearCaptureApp:
         browse_btn = QPushButton("Browse")
         browse_btn.clicked.connect(self._browse_output)
         top_grid.addWidget(browse_btn, 1, 2)
+
+        top_grid.addWidget(QLabel("Profile"), 2, 0)
+        self.profile_combo = QComboBox()
+        self.profile_combo.setEditable(False)
+        top_grid.addWidget(self.profile_combo, 2, 1)
+        self.apply_profile_btn = QPushButton("Apply")
+        self.apply_profile_btn.clicked.connect(self._apply_selected_profile)
+        top_grid.addWidget(self.apply_profile_btn, 2, 2)
+
+        profile_actions_widget = QWidget()
+        profile_actions = QHBoxLayout(profile_actions_widget)
+        profile_actions.setContentsMargins(0, 0, 0, 0)
+        profile_actions.setSpacing(6)
+
+        self.save_profile_btn = QPushButton("Save")
+        self.save_profile_btn.clicked.connect(self._save_current_profile)
+        self.import_profile_btn = QPushButton("Import")
+        self.import_profile_btn.clicked.connect(self._import_profile)
+        self.export_profile_btn = QPushButton("Export")
+        self.export_profile_btn.clicked.connect(self._export_selected_profile)
+
+        profile_actions.addWidget(self.save_profile_btn)
+        profile_actions.addWidget(self.import_profile_btn)
+        profile_actions.addWidget(self.export_profile_btn)
+        profile_actions.addStretch(1)
+
+        top_grid.addWidget(profile_actions_widget, 3, 1, 1, 2)
 
         top_grid.setColumnStretch(1, 1)
         outer.addWidget(top_card)
@@ -399,6 +443,143 @@ class WearCaptureApp:
         if progress.phase == "stopping":
             self.status_label.setText("Stopping and saving...")
 
+    def _reload_profiles(self, selected_name: str | None = None) -> None:
+        profiles = load_profiles(self.profile_path)
+        self.profile_map = {profile.name.lower(): profile for profile in profiles}
+
+        self.profile_combo.clear()
+        for profile in profiles:
+            self.profile_combo.addItem(profile.name)
+
+        target = selected_name or ""
+        if target:
+            idx = self.profile_combo.findText(target)
+            if idx >= 0:
+                self.profile_combo.setCurrentIndex(idx)
+
+    def _selected_profile(self) -> CaptureProfile | None:
+        return self.profile_map.get(self.profile_combo.currentText().strip().lower())
+
+    def _apply_profile_to_form(self, profile: CaptureProfile) -> None:
+        cfg = profile.config
+
+        if "simple_mode" in cfg:
+            self.simple_radio.setChecked(bool(cfg["simple_mode"]))
+            self.advanced_radio.setChecked(not bool(cfg["simple_mode"]))
+
+        if "swipe_x1" in cfg:
+            self.swipe_x1_input.setText("" if cfg["swipe_x1"] is None else str(cfg["swipe_x1"]))
+        if "swipe_y1" in cfg:
+            self.swipe_y1_input.setText("" if cfg["swipe_y1"] is None else str(cfg["swipe_y1"]))
+        if "swipe_x2" in cfg:
+            self.swipe_x2_input.setText("" if cfg["swipe_x2"] is None else str(cfg["swipe_x2"]))
+        if "swipe_y2" in cfg:
+            self.swipe_y2_input.setText("" if cfg["swipe_y2"] is None else str(cfg["swipe_y2"]))
+
+        if "swipe_duration_ms" in cfg:
+            self.swipe_duration_input.setText(str(cfg["swipe_duration_ms"]))
+        if "scroll_delay_ms" in cfg:
+            self.scroll_delay_input.setText(str(cfg["scroll_delay_ms"]))
+        if "similarity_threshold" in cfg:
+            self.similarity_input.setText(str(cfg["similarity_threshold"]))
+        if "max_swipes" in cfg:
+            self.max_swipes_input.setText(str(cfg["max_swipes"]))
+        if "circular_mask" in cfg:
+            self.circular_checkbox.setChecked(bool(cfg["circular_mask"]))
+
+    def _apply_selected_profile(self) -> None:
+        profile = self._selected_profile()
+        if not profile:
+            return
+        self._apply_profile_to_form(profile)
+        self._append_log(f"Applied profile '{profile.name}'")
+
+    def _save_current_profile(self) -> None:
+        name, ok = QInputDialog.getText(self.window, "Save Profile", "Profile name")
+        if not ok:
+            return
+
+        name = name.strip()
+        if not name:
+            QMessageBox.information(self.window, "WearCapture", "Profile name cannot be empty")
+            return
+
+        try:
+            cfg = self._build_config()
+            cfg.validate()
+        except Exception as exc:
+            QMessageBox.critical(self.window, "Invalid Configuration", str(exc))
+            return
+
+        serial = self.device_combo.currentText().strip()
+        model_regex: str | None = None
+        display_size: tuple[int, int] | None = None
+        if serial:
+            for dev in self.adb.list_devices():
+                if dev.serial == serial:
+                    raw_model = extract_model_from_details(dev.details)
+                    if raw_model:
+                        model_regex = f"^{re.escape(raw_model)}$"
+                    break
+            display_size = self.adb.get_display_size(serial)
+
+        path = upsert_profile(
+            name=name,
+            description=f"Saved from UI ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})",
+            config=config_to_profile_config(cfg),
+            model_regex=model_regex,
+            display_size=display_size,
+            path=self.profile_path,
+        )
+        self._reload_profiles(selected_name=name)
+        self._append_log(f"Saved profile '{name}' to {path}")
+
+    def _import_profile(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self.window,
+            "Import Profile",
+            str(Path.cwd()),
+            "JSON Files (*.json)",
+        )
+        if not selected:
+            return
+
+        profile = import_profile(Path(selected), path=self.profile_path)
+        self._reload_profiles(selected_name=profile.name)
+        self._append_log(f"Imported profile '{profile.name}' from {selected}")
+
+    def _export_selected_profile(self) -> None:
+        profile = self._selected_profile()
+        if not profile:
+            return
+
+        selected, _ = QFileDialog.getSaveFileName(
+            self.window,
+            "Export Profile",
+            str(Path.cwd() / f"{profile.name}.json"),
+            "JSON Files (*.json)",
+        )
+        if not selected:
+            return
+
+        out = export_profile(profile, Path(selected))
+        self._append_log(f"Exported profile '{profile.name}' to {out}")
+
+    def _auto_suggest_profile_for_device(self) -> None:
+        serial = self.device_combo.currentText().strip()
+        if not serial:
+            return
+
+        profile = suggest_profile_for_serial(self.adb, serial, self.profile_path)
+        if not profile:
+            return
+
+        idx = self.profile_combo.findText(profile.name)
+        if idx >= 0:
+            self.profile_combo.setCurrentIndex(idx)
+            self._apply_profile_to_form(profile)
+            self._append_log(f"Suggested profile '{profile.name}' for {serial}")
+
     def _refresh_devices(self) -> None:
         try:
             devices = [d for d in self.adb.list_devices() if d.state == "device"]
@@ -407,6 +588,7 @@ class WearCaptureApp:
             return
 
         current = self.device_combo.currentText()
+        self.device_combo.blockSignals(True)
         self.device_combo.clear()
         for dev in devices:
             self.device_combo.addItem(dev.serial)
@@ -417,6 +599,15 @@ class WearCaptureApp:
             self._append_log("Detected devices: " + ", ".join(d.serial for d in devices))
         else:
             self._append_log("No online ADB devices found.")
+        self.device_combo.blockSignals(False)
+
+        if devices:
+            self._auto_suggest_profile_for_device()
+
+    def _on_device_changed(self, _text: str) -> None:
+        if self.worker and self.worker.is_alive():
+            return
+        self._auto_suggest_profile_for_device()
 
     def _browse_output(self) -> None:
         selected, _ = QFileDialog.getSaveFileName(

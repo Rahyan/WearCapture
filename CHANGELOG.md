@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.1.1 - 2026-02-18
+
+### Added
+- Profile system with builtin + user-defined named profiles (`~/.wearcapture/profiles.json`)
+- Profile CLI: list, suggest, import, export, capture-time apply, capture-time save
+- Profile UI actions: apply, save, import, export
+- Auto-suggested profile application based on connected device model + display size
+- Synthetic fixture regression suite for overlap trimming, stop detection, and stitched-size baselines
+
+### Changed
+- Build workflow now publishes matrix binaries to tag releases
+- Packaging script supports optional output name suffixes for multi-OS release assets
+
+### Fixed
+- CI import stability by installing package in editable mode before tests
+
 ## v0.1.0 - 2026-02-18
 
 ### Added
