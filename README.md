@@ -17,7 +17,7 @@ No watch app. No root. No cloud.
 
 ## Example Outputs (Real Watch Data)
 
-These examples were generated from a connected Samsung Wear OS watch.
+These examples were generated from a connected Samsung Galaxy Watch4 Classic Wear OS 5 watch.
 
 ![User capture example](docs/examples/watch_capture_user.png)
 ![Smoke capture example](docs/examples/watch_capture_smoke.png)
